@@ -1797,3 +1797,533 @@ Authentication responsibilities are split across layers.
 This layered architecture is why Django authentication is **extensible and modular**.
 
 ---
+
+This reflects how Django internally processes authentication.
+
+---
+
+# 1. Initial State Before Login
+
+User already exists in database.
+
+Example row in `accounts_user`:
+
+```
+id = 5
+username = shubham
+password = pbkdf2_sha256$600000$saltsalt$hashvalue
+```
+
+User opens login page and submits:
+
+```
+POST /login
+username=shubham
+password=abc123
+```
+
+Request enters Django.
+
+---
+
+# 2. Request Enters Django
+
+Execution pipeline:
+
+```
+WSGI server
+    ↓
+Django request handler
+    ↓
+Middleware stack
+    ↓
+URL resolver
+    ↓
+login_view
+```
+
+Now the login view executes.
+
+Example:
+
+```python
+user = authenticate(request, username=username, password=password)
+```
+
+This is where the **authentication call chain starts**.
+
+---
+
+# 3. authenticate() Entry Point
+
+Function location:
+
+```
+django.contrib.auth.__init__.py
+```
+
+Definition:
+
+```python
+authenticate(request=None, **credentials)
+```
+
+Simplified implementation:
+
+```python
+def authenticate(request=None, **credentials):
+
+    for backend in get_backends():
+
+        user = backend.authenticate(request, **credentials)
+
+        if user is not None:
+            user.backend = backend_path
+            return user
+
+    return None
+```
+
+Important behavior:
+
+```
+authenticate() does NOT verify passwords itself.
+```
+
+It **delegates to authentication backends**.
+
+---
+
+# 4. Backend Discovery
+
+Function:
+
+```
+get_backends()
+```
+
+This loads backends from settings:
+
+```python
+AUTHENTICATION_BACKENDS = [
+    "django.contrib.auth.backends.ModelBackend"
+]
+```
+
+So Django loads:
+
+```
+ModelBackend
+```
+
+---
+
+# 5. ModelBackend.authenticate()
+
+Location:
+
+```
+django.contrib.auth.backends.ModelBackend
+```
+
+Method:
+
+```python
+def authenticate(self, request, username=None, password=None):
+```
+
+Simplified code:
+
+```python
+UserModel = get_user_model()
+
+try:
+    user = UserModel.objects.get(username=username)
+except UserModel.DoesNotExist:
+    return None
+
+if user.check_password(password):
+    return user
+
+return None
+```
+
+Execution flow:
+
+```
+lookup user by username
+       ↓
+verify password hash
+       ↓
+return user or None
+```
+
+---
+
+# 6. Password Verification
+
+Function called:
+
+```
+user.check_password(password)
+```
+
+Location:
+
+```
+django.contrib.auth.base_user.AbstractBaseUser
+```
+
+Implementation:
+
+```python
+def check_password(self, raw_password):
+
+    return check_password(raw_password, self.password)
+```
+
+Now Django calls the global password utility.
+
+---
+
+# 7. Password Hash Verification
+
+Function:
+
+```
+django.contrib.auth.hashers.check_password()
+```
+
+Simplified implementation:
+
+```python
+def check_password(password, encoded):
+
+    hasher = identify_hasher(encoded)
+
+    return hasher.verify(password, encoded)
+```
+
+Process:
+
+```
+stored hash parsed
+        ↓
+algorithm identified
+        ↓
+password hashed again
+        ↓
+hash comparison
+```
+
+Example stored value:
+
+```
+pbkdf2_sha256$600000$salt$hash
+```
+
+Steps executed:
+
+```
+extract algorithm
+extract salt
+recompute PBKDF2(password + salt)
+compare hashes
+```
+
+If equal:
+
+```
+True
+```
+
+User authenticated.
+
+---
+
+# 8. authenticate() Returns User
+
+Back to:
+
+```python
+authenticate()
+```
+
+Now Django attaches backend info:
+
+```
+user.backend = "django.contrib.auth.backends.ModelBackend"
+```
+
+Return value:
+
+```
+<User: shubham>
+```
+
+Important:
+
+```
+User is authenticated but NOT logged in yet.
+```
+
+---
+
+# 9. login() Function Call
+
+View calls:
+
+```python
+login(request, user)
+```
+
+Location:
+
+```
+django.contrib.auth.__init__.py
+```
+
+Simplified implementation:
+
+```python
+def login(request, user):
+
+    session_auth_hash = user.get_session_auth_hash()
+
+    request.session["_auth_user_id"] = user.pk
+    request.session["_auth_user_backend"] = user.backend
+    request.session["_auth_user_hash"] = session_auth_hash
+```
+
+Main responsibility:
+
+```
+store authentication state inside session
+```
+
+---
+
+# 10. Session Creation
+
+If session doesn't exist:
+
+```
+SessionMiddleware creates one
+```
+
+Session engine default:
+
+```
+django.contrib.sessions.backends.db
+```
+
+Session store object:
+
+```
+SessionStore
+```
+
+Example session content:
+
+```
+{
+ "_auth_user_id": "5",
+ "_auth_user_backend": "django.contrib.auth.backends.ModelBackend",
+ "_auth_user_hash": "securehash"
+}
+```
+
+---
+
+# 11. Session Saved
+
+Session store writes to database.
+
+Table:
+
+```
+django_session
+```
+
+Example record:
+
+```
+session_key = 8a3c1f29ab23d
+session_data = encoded dict
+expire_date = 2026-03-20
+```
+
+---
+
+# 12. Session Cookie Sent to Browser
+
+Response header:
+
+```
+Set-Cookie: sessionid=8a3c1f29ab23d
+```
+
+Browser stores:
+
+```
+sessionid cookie
+```
+
+Login request ends.
+
+---
+
+# 13. Next Request (User Visits Dashboard)
+
+Browser sends:
+
+```
+GET /dashboard
+Cookie: sessionid=8a3c1f29ab23d
+```
+
+Now middleware becomes important.
+
+---
+
+# 14. SessionMiddleware Execution
+
+Location:
+
+```
+django.contrib.sessions.middleware.SessionMiddleware
+```
+
+Simplified process:
+
+```python
+session_key = request.COOKIES["sessionid"]
+
+session_data = SessionStore.load(session_key)
+
+request.session = session_data
+```
+
+Now request contains:
+
+```
+request.session
+```
+
+Example:
+
+```
+{
+ "_auth_user_id": "5",
+ "_auth_user_backend": "...ModelBackend"
+}
+```
+
+---
+
+# 15. AuthenticationMiddleware Execution
+
+Location:
+
+```
+django.contrib.auth.middleware.AuthenticationMiddleware
+```
+
+Simplified logic:
+
+```python
+user_id = request.session["_auth_user_id"]
+
+user = User.objects.get(pk=user_id)
+
+request.user = user
+```
+
+If session missing:
+
+```
+request.user = AnonymousUser()
+```
+
+---
+
+# 16. View Finally Executes
+
+Example dashboard:
+
+```python
+def dashboard(request):
+
+    print(request.user)
+```
+
+Result:
+
+```
+<User: shubham>
+```
+
+User is authenticated.
+
+---
+
+# Full Django Login Call Chain
+
+Complete runtime sequence:
+
+```
+login_view
+    ↓
+authenticate()
+    ↓
+get_backends()
+    ↓
+ModelBackend.authenticate()
+    ↓
+User.objects.get()
+    ↓
+check_password()
+    ↓
+hashers.check_password()
+    ↓
+authenticate() returns user
+    ↓
+login()
+    ↓
+request.session updated
+    ↓
+SessionStore.save()
+    ↓
+session cookie sent to browser
+```
+
+Next request:
+
+```
+HTTP request
+    ↓
+SessionMiddleware
+    ↓
+load session
+    ↓
+AuthenticationMiddleware
+    ↓
+load user
+    ↓
+request.user available
+```
+
+---
+
+# Key Architectural Insight
+
+Django authentication consists of **four major layers**.
+
+| Layer                  | Responsibility          |
+| ---------------------- | ----------------------- |
+| User model             | identity storage        |
+| Hashers                | credential security     |
+| Authentication backend | credential verification |
+| Session framework      | login persistence       |
+
+These layers interact during login but remain **independently replaceable**, which is why Django authentication is highly extensible.
