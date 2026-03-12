@@ -1393,22 +1393,407 @@ The **user model defines the identity schema** used across the entire stack.
 
 ---
 
-# Next Step in the Authentication System
+# 5. Django Authentication Backends and Login Flow
 
-Now that identity storage is understood, the next logical subsystem is:
+## 5.1 Purpose of Authentication Backends
+
+**Fact**
+
+Authentication backends are responsible for **verifying credentials and returning a user object**.
+
+In Django:
+
+```python
+authenticate(...)
+```
+
+does **not directly verify credentials**.
+
+Instead it **delegates verification to configured authentication backends**.
+
+Conceptual model:
 
 ```
-Password Hashing System
+credentials
+     ↓
+authenticate()
+     ↓
+authentication backend
+     ↓
+user object OR None
 ```
 
-This explains:
+This design allows Django to support **multiple authentication mechanisms simultaneously**.
 
-* how Django stores passwords securely
-* PBKDF2
-* hashing configuration
-* verification process
-* defense against database leaks
+Examples:
 
-This is one of the **most security-critical parts of authentication**.
+```
+username + password
+email + password
+LDAP authentication
+OAuth provider
+SSO systems
+```
+
+---
+
+# 5.2 Default Authentication Backend
+
+Django ships with a default backend:
+
+```
+django.contrib.auth.backends.ModelBackend
+```
+
+Responsibilities:
+
+| Responsibility          | Description                |
+| ----------------------- | -------------------------- |
+| credential verification | validate username/password |
+| user retrieval          | load user from database    |
+| permission checks       | integrate with permissions |
+
+Configuration:
+
+```python
+AUTHENTICATION_BACKENDS = [
+    "django.contrib.auth.backends.ModelBackend"
+]
+```
+
+This backend authenticates using the **User model stored in the database**.
+
+---
+
+# 5.3 The `authenticate()` Function
+
+Authentication always starts with:
+
+```python
+from django.contrib.auth import authenticate
+```
+
+Example usage:
+
+```python
+user = authenticate(
+    request,
+    username="shubham",
+    password="mypassword"
+)
+```
+
+Return values:
+
+| Result        | Meaning                |
+| ------------- | ---------------------- |
+| `User object` | authentication success |
+| `None`        | authentication failure |
+
+Important property:
+
+```python
+authenticate()
+```
+
+**does not log the user in**.
+
+It only verifies credentials.
+
+---
+
+# 5.4 Internal Backend Resolution
+
+When `authenticate()` runs, Django executes roughly:
+
+```
+for backend in AUTHENTICATION_BACKENDS:
+      user = backend.authenticate(...)
+      if user:
+            return user
+return None
+```
+
+This means:
+
+* multiple authentication systems can coexist
+* Django stops at the **first successful backend**
+
+Example architecture:
+
+```
+OAuthBackend
+LDAPBackend
+ModelBackend
+```
+
+If OAuth succeeds, the others are never checked.
+
+---
+
+# 5.5 `login()` Function
+
+Authentication verification is separate from **login state creation**.
+
+To persist login state:
+
+```python
+from django.contrib.auth import login
+```
+
+Example flow:
+
+```python
+user = authenticate(request, username, password)
+
+if user:
+    login(request, user)
+```
+
+Responsibilities of `login()`:
+
+| Operation      | Description           |
+| -------------- | --------------------- |
+| create session | persistent login      |
+| store user id  | inside session        |
+| store backend  | authentication source |
+
+---
+
+# 5.6 What `login()` Stores in the Session
+
+After login, Django writes values into the session.
+
+Example session data:
+
+```
+{
+ "_auth_user_id": "5",
+ "_auth_user_backend": "django.contrib.auth.backends.ModelBackend",
+ "_auth_user_hash": "session integrity hash"
+}
+```
+
+Meaning:
+
+| Key                  | Purpose            |
+| -------------------- | ------------------ |
+| `_auth_user_id`      | user primary key   |
+| `_auth_user_backend` | backend used       |
+| `_auth_user_hash`    | session validation |
+
+These values allow Django to **restore authentication state on future requests**.
+
+---
+
+# 5.7 Request Lifecycle After Login
+
+Once login succeeds, every request goes through middleware.
+
+Lifecycle:
+
+```
+HTTP request
+      ↓
+SessionMiddleware
+      ↓
+AuthenticationMiddleware
+      ↓
+request.user attached
+```
+
+Process detail:
+
+1. Browser sends cookie
+
+```
+sessionid=abc123
+```
+
+2. Session middleware loads session record.
+
+3. Authentication middleware reads:
+
+```
+_auth_user_id
+```
+
+4. Django loads the user from the database.
+
+5. User instance becomes available as:
+
+```python
+request.user
+```
+
+---
+
+# 5.8 `request.user`
+
+After middleware runs:
+
+```python
+request.user
+```
+
+contains either:
+
+```
+User instance
+```
+
+or
+
+```
+AnonymousUser
+```
+
+Example usage:
+
+```python
+if request.user.is_authenticated:
+    print(request.user.username)
+```
+
+This allows views to **determine authentication state safely**.
+
+---
+
+# 5.9 Logout Process
+
+Logging out removes the session authentication data.
+
+Example:
+
+```python
+from django.contrib.auth import logout
+
+logout(request)
+```
+
+Operations performed:
+
+```
+delete session authentication keys
+invalidate session
+```
+
+After logout:
+
+```
+request.user → AnonymousUser
+```
+
+---
+
+# 5.10 Example Login View
+
+Minimal login implementation:
+
+```python
+from django.contrib.auth import authenticate, login
+from django.shortcuts import render
+
+def login_view(request):
+
+    username = request.POST["username"]
+    password = request.POST["password"]
+
+    user = authenticate(request, username=username, password=password)
+
+    if user:
+        login(request, user)
+```
+
+Authentication pipeline:
+
+```
+credentials
+     ↓
+authenticate()
+     ↓
+backend verification
+     ↓
+login()
+     ↓
+session created
+```
+
+---
+
+# 5.11 Custom Authentication Backends
+
+Developers can implement custom authentication logic.
+
+Example cases:
+
+```
+email login
+phone number login
+LDAP authentication
+OAuth providers
+external identity servers
+```
+
+Basic structure:
+
+```python
+class CustomBackend:
+
+    def authenticate(self, request, username=None, password=None):
+        ...
+```
+
+Backend must return:
+
+```
+User instance
+```
+
+or
+
+```
+None
+```
+
+---
+
+# 5.12 Architectural Flow of Django Authentication
+
+Complete pipeline:
+
+```
+User submits credentials
+        ↓
+authenticate()
+        ↓
+authentication backend
+        ↓
+user object returned
+        ↓
+login()
+        ↓
+session created
+        ↓
+middleware loads user on each request
+```
+
+This separation of responsibilities allows Django to support **multiple authentication strategies without changing application code**.
+
+---
+
+# Architectural Insight
+
+Authentication responsibilities are split across layers.
+
+| Layer                  | Responsibility          |
+| ---------------------- | ----------------------- |
+| User model             | identity storage        |
+| hashers                | password security       |
+| authentication backend | credential verification |
+| login()                | session creation        |
+| middleware             | attach user to request  |
+
+This layered architecture is why Django authentication is **extensible and modular**.
 
 ---
