@@ -1012,5 +1012,403 @@ Login/logout flow
    ↓
 Sessions
 ```
+---
+
+# 4. Custom User Models in Django
+
+## 4.1 Why Custom User Models Exist
+
+**Fact**
+
+The default model is designed for **generic applications**, not for all real-world identity systems.
+
+Common requirements that exceed the default schema:
+
+| Requirement                     | Example                    |
+| ------------------------------- | -------------------------- |
+| Email as login identity         | email instead of username  |
+| Remove username entirely        | modern SaaS systems        |
+| Additional identity fields      | phone number, organization |
+| Different authentication scheme | external identity provider |
+| Domain-specific user metadata   | roles, departments         |
+
+Example identity schema for a SaaS system:
+
+```
+User
+ ├── email
+ ├── password
+ ├── organization_id
+ └── role
+```
+
+The built-in `User` model cannot be modified safely after migrations.
+
+Therefore Django provides **custom user models**.
+
+---
+
+# 4.2 Django's Design Strategy
+
+Django supports two approaches.
+
+| Method                 | Use Case               |
+| ---------------------- | ---------------------- |
+| **Extend User model**  | minor additions        |
+| **Replace User model** | major identity changes |
+
+Implementation mechanisms:
+
+| Base Class         | Purpose                           |
+| ------------------ | --------------------------------- |
+| `AbstractUser`     | extend existing structure         |
+| `AbstractBaseUser` | build identity model from scratch |
+
+---
+
+# 4.3 Approach 1 — Extending with `AbstractUser`
+
+This is the **recommended approach for most projects**.
+
+`AbstractUser` provides:
+
+* username
+* password
+* permissions
+* groups
+* authentication logic
+
+You simply **add fields**.
+
+Example:
+
+```python
+from django.contrib.auth.models import AbstractUser
+from django.db import models
+
+class User(AbstractUser):
+    phone_number = models.CharField(max_length=20)
+    organization = models.CharField(max_length=100)
+```
+
+Resulting schema:
+
+```
+User
+ ├── username
+ ├── password
+ ├── email
+ ├── phone_number
+ └── organization
+```
+
+All authentication features continue to work automatically.
+
+---
+
+# 4.4 Registering the Custom Model
+
+After defining the model, Django must be told to use it.
+
+In `settings.py`:
+
+```python
+AUTH_USER_MODEL = "accounts.User"
+```
+
+Important constraint:
+
+**This must be defined before the first migration.**
+
+Failure mode:
+
+```
+Changing user model after migrations
+→ migration conflicts
+→ foreign key corruption
+```
+
+Fixing this later can require **full database reset**.
+
+---
+
+# 4.5 Approach 2 — Using `AbstractBaseUser`
+
+This approach is used when **identity logic must be redesigned**.
+
+`AbstractBaseUser` provides only:
+
+```
+password hashing
+last_login
+authentication hooks
+```
+
+Everything else must be implemented manually.
+
+Example minimal model:
+
+```python
+from django.contrib.auth.models import AbstractBaseUser
+from django.db import models
+
+class User(AbstractBaseUser):
+    email = models.EmailField(unique=True)
+
+    USERNAME_FIELD = "email"
+```
+
+You must implement:
+
+* user manager
+* permissions integration
+* admin configuration
+* required fields
+
+Because of this complexity, it is **rarely necessary**.
+
+---
+
+# 4.6 Required Properties for `AbstractBaseUser`
+
+Django expects several attributes.
+
+Example:
+
+```python
+USERNAME_FIELD = "email"
+REQUIRED_FIELDS = []
+```
+
+Meaning:
+
+| Property          | Purpose                          |
+| ----------------- | -------------------------------- |
+| `USERNAME_FIELD`  | primary login identifier         |
+| `REQUIRED_FIELDS` | required when creating superuser |
+
+Example:
+
+```
+login identity = email
+```
+
+---
+
+# 4.7 Custom User Manager
+
+A manager is required to correctly create users.
+
+Example:
+
+```python
+from django.contrib.auth.models import BaseUserManager
+
+class UserManager(BaseUserManager):
+
+    def create_user(self, email, password=None):
+        user = self.model(email=self.normalize_email(email))
+        user.set_password(password)
+        user.save()
+        return user
+```
+
+Important behavior:
+
+```
+set_password()
+```
+
+This ensures **secure hashing**.
+
+If developers instead do:
+
+```
+user.password = password
+```
+
+it results in **plaintext password storage**, which is a critical security failure.
+
+---
+
+# 4.8 Identity Field Selection
+
+Choosing the login identifier is an **architectural decision**.
+
+Common patterns:
+
+| Identity Field | Typical System    |
+| -------------- | ----------------- |
+| username       | legacy systems    |
+| email          | modern web apps   |
+| phone number   | mobile-first apps |
+| external ID    | SSO providers     |
+
+Modern SaaS pattern:
+
+```
+email + password
+```
+
+No username.
+
+Example configuration:
+
+```python
+USERNAME_FIELD = "email"
+```
+
+---
+
+# 4.9 Accessing the Custom User Model
+
+Code should never hardcode:
+
+```
+django.contrib.auth.models.User
+```
+
+Instead use:
+
+```python
+from django.contrib.auth import get_user_model
+
+User = get_user_model()
+```
+
+or in models:
+
+```python
+from django.conf import settings
+
+settings.AUTH_USER_MODEL
+```
+
+Example foreign key:
+
+```python
+author = models.ForeignKey(
+    settings.AUTH_USER_MODEL,
+    on_delete=models.CASCADE
+)
+```
+
+This prevents dependency breakage.
+
+---
+
+# 4.10 User Model and Permissions
+
+The custom user model still integrates with Django's permission system.
+
+Relationships remain:
+
+```
+User
+ ├── Groups
+ └── Permissions
+```
+
+These are provided by:
+
+```
+PermissionsMixin
+```
+
+If using `AbstractUser`, this is already included.
+
+If using `AbstractBaseUser`, it must be added manually.
+
+---
+
+# 4.11 Migration Implications
+
+Changing the user model impacts many tables.
+
+Dependencies include:
+
+```
+sessions
+admin
+permissions
+foreign keys
+```
+
+Therefore Django strongly recommends:
+
+```
+Define custom user model at project start
+```
+
+Even if initially identical to the default model.
+
+---
+
+# 4.12 Recommended Production Pattern
+
+Most professional Django systems use:
+
+```
+AbstractUser
++
+email as login identifier
+```
+
+Example:
+
+```python
+class User(AbstractUser):
+    username = None
+    email = models.EmailField(unique=True)
+
+    USERNAME_FIELD = "email"
+    REQUIRED_FIELDS = []
+```
+
+This produces:
+
+```
+login = email
+```
+
+while retaining Django’s authentication infrastructure.
+
+---
+
+# Architectural Summary
+
+Identity layer:
+
+```
+User model
+   ↓
+Authentication backend
+   ↓
+Session framework
+   ↓
+Permissions system
+```
+
+The **user model defines the identity schema** used across the entire stack.
+
+---
+
+# Next Step in the Authentication System
+
+Now that identity storage is understood, the next logical subsystem is:
+
+```
+Password Hashing System
+```
+
+This explains:
+
+* how Django stores passwords securely
+* PBKDF2
+* hashing configuration
+* verification process
+* defense against database leaks
+
+This is one of the **most security-critical parts of authentication**.
 
 ---
