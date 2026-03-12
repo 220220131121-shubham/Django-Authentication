@@ -603,3 +603,414 @@ Implication:
 
 * works naturally for server-rendered apps
 * requires adjustments for APIs (DRF, JWT)
+
+---
+
+# 3. Django User Model
+
+## 3.1 Role of the User Model
+
+**Fact**
+
+The **User model** represents an authenticated identity inside Django.
+
+It is the **central data structure** used by the authentication system.
+
+Conceptually:
+
+```
+User
+ ├── identity fields
+ ├── credential fields
+ ├── permission flags
+ └── metadata
+```
+
+The user record binds together:
+
+* identity
+* authentication credentials
+* authorization properties
+* session ownership
+
+---
+
+## 3.2 Default Django User Model
+
+The default implementation is:
+
+```
+django.contrib.auth.models.User
+```
+
+This model is automatically created when migrations run.
+
+Database table:
+
+```
+auth_user
+```
+
+---
+
+## 3.3 Default Fields
+
+The built-in user model contains several fields grouped by responsibility.
+
+### Identity Fields
+
+These uniquely identify the user.
+
+| Field      | Type   | Purpose                  |
+| ---------- | ------ | ------------------------ |
+| `username` | string | primary login identifier |
+| `email`    | string | contact identifier       |
+
+Important note:
+
+`username` is the **default authentication identity**.
+
+---
+
+### Credential Field
+
+| Field      | Purpose         |
+| ---------- | --------------- |
+| `password` | hashed password |
+
+Passwords are **never stored in plaintext**.
+
+Example stored value:
+
+```
+pbkdf2_sha256$600000$saltsalt$hashvalue
+```
+
+Structure:
+
+```
+algorithm$salt$hash
+```
+
+---
+
+### Status Flags
+
+These fields control **account state**.
+
+| Field          | Meaning                  |
+| -------------- | ------------------------ |
+| `is_active`    | account enabled          |
+| `is_staff`     | admin site access        |
+| `is_superuser` | bypass permission checks |
+
+Example permission logic:
+
+```
+if user.is_superuser:
+    allow_all_actions
+```
+
+---
+
+### Metadata Fields
+
+| Field         | Purpose             |
+| ------------- | ------------------- |
+| `first_name`  | profile             |
+| `last_name`   | profile             |
+| `date_joined` | account creation    |
+| `last_login`  | last authentication |
+
+These are **not used for authentication logic** but are useful for application behavior.
+
+---
+
+## 3.4 Database Schema Representation
+
+Simplified table structure:
+
+```
+auth_user
+
+id (PK)
+username
+password
+email
+first_name
+last_name
+is_active
+is_staff
+is_superuser
+last_login
+date_joined
+```
+
+Primary key:
+
+```
+id
+```
+
+All sessions reference the user through this id.
+
+---
+
+## 3.5 How Django Uses the User Model
+
+The user object is attached to every request after authentication.
+
+Example inside a view:
+
+```python
+def dashboard(request):
+    user = request.user
+```
+
+Possible values:
+
+```
+User instance
+```
+
+or
+
+```
+AnonymousUser
+```
+
+Example usage:
+
+```python
+if request.user.is_authenticated:
+    print(request.user.username)
+```
+
+---
+
+## 3.6 Password Storage Mechanism
+
+Django uses **secure password hashing**.
+
+The hashing framework is located in:
+
+```
+django.contrib.auth.hashers
+```
+
+Default algorithm (modern Django versions):
+
+```
+PBKDF2 + SHA256
+```
+
+Hashing process:
+
+```
+password
+   ↓
+salt generated
+   ↓
+key stretching (PBKDF2)
+   ↓
+stored hash
+```
+
+Important property:
+
+```
+stored_hash ≠ password
+```
+
+Password verification process:
+
+```
+hash(input_password)
+        ↓
+compare with stored hash
+```
+
+---
+
+## 3.7 Creating Users
+
+Django provides helper methods to create users safely.
+
+### Creating a normal user
+
+```python
+from django.contrib.auth.models import User
+
+User.objects.create_user(
+    username="shubham",
+    email="shubham@example.com",
+    password="securepassword"
+)
+```
+
+Important:
+
+```
+create_user()
+```
+
+automatically hashes the password.
+
+---
+
+### Creating a superuser
+
+```
+python manage.py createsuperuser
+```
+
+This sets:
+
+```
+is_staff = True
+is_superuser = True
+```
+
+---
+
+## 3.8 Password Verification
+
+During login Django executes roughly:
+
+```
+authenticate(username, password)
+```
+
+Internally:
+
+```
+1. find user by username
+2. hash provided password
+3. compare with stored hash
+```
+
+If match:
+
+```
+return user
+```
+
+Else:
+
+```
+return None
+```
+
+---
+
+## 3.9 Accessing the User Model Properly
+
+Direct imports are discouraged in reusable apps.
+
+Correct approach:
+
+```python
+from django.contrib.auth import get_user_model
+
+User = get_user_model()
+```
+
+Reason:
+
+Django allows **custom user models**.
+
+Hardcoding the default model breaks extensibility.
+
+---
+
+## 3.10 User Relationships
+
+The user model connects to several other authentication tables.
+
+Simplified relational diagram:
+
+```
+User
+ ├── Groups (many-to-many)
+ └── Permissions (many-to-many)
+```
+
+Tables involved:
+
+```
+auth_group
+auth_permission
+auth_user_groups
+auth_user_user_permissions
+```
+
+These relationships implement **authorization**.
+
+---
+
+# Architectural Insight
+
+Important system property:
+
+```
+User model = identity anchor
+```
+
+Everything references it:
+
+```
+sessions
+permissions
+groups
+authentication backends
+```
+
+If the user model changes, **many parts of the system are affected**.
+
+---
+
+# 3.11 Limitation of the Default User Model
+
+The built-in model works well for basic systems but has constraints.
+
+Examples:
+
+```
+email login instead of username
+additional profile fields
+external identity providers
+custom authentication logic
+```
+
+Because of this, Django supports **custom user models**.
+
+---
+
+# Next Logical Step
+
+After understanding the user model, the next topic should be:
+
+```
+Custom User Models
+```
+
+because it explains:
+
+* why the default model is often insufficient
+* how Django allows identity schema changes
+
+The progression will be:
+
+```
+User model
+   ↓
+Custom user models
+   ↓
+Authentication backends
+   ↓
+Login/logout flow
+   ↓
+Sessions
+```
+
+---
